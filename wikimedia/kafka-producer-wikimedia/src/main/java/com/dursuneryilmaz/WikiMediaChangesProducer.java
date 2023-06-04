@@ -34,9 +34,8 @@ public class WikiMediaChangesProducer {
 
 
         // start producer async
-        try (EventSource eventSource = new EventSource.Builder(eventHandler, URI.create(url)).build()) {
-            eventSource.start();
-        }
+        EventSource eventSource = new EventSource.Builder(eventHandler, URI.create(url)).build();
+        eventSource.start();
 
         TimeUnit.MINUTES.sleep(10);
 
