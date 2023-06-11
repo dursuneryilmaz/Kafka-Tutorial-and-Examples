@@ -63,6 +63,9 @@ public class OpenSearchConsumer {
                 IndexResponse indexResponse = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
                 log.info(indexResponse.getId() + " : inserted");
             }
+            // commit offsets manually, achieve at least once strategy
+            kafkaConsumer.commitSync();
+            log.info("Offset committed!");
         }
     }
 
@@ -129,6 +132,7 @@ public class OpenSearchConsumer {
         properties.setProperty(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, groupId);
         properties.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
+        properties.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
 
         return new KafkaConsumer<>(properties);
     }
