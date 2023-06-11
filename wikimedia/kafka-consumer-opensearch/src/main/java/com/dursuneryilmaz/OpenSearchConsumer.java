@@ -12,6 +12,8 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.opensearch.action.bulk.BulkRequest;
+import org.opensearch.action.bulk.BulkResponse;
 import org.opensearch.action.index.IndexRequest;
 import org.opensearch.action.index.IndexResponse;
 import org.opensearch.client.RequestOptions;
@@ -20,6 +22,7 @@ import org.opensearch.client.RestHighLevelClient;
 import org.opensearch.client.indices.CreateIndexRequest;
 import org.opensearch.client.indices.GetIndexRequest;
 import org.opensearch.common.xcontent.XContentType;
+import org.opensearch.rest.RestStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -51,6 +54,9 @@ public class OpenSearchConsumer {
             int recordCount = recordList.count();
             log.info("Read record count: " + recordCount);
 
+            // process as bulk, improve performance
+            BulkRequest bulkRequest = new BulkRequest();
+
             for (ConsumerRecord<String, String> record : recordList) {
                 // make consumer idempotent and transaction unique set an id to index request, get id from incoming data preferred
                 // String id = record.topic() + "_" + record.partition() + "_" + record.offset(); // or get id from kafka coordinates
@@ -60,12 +66,24 @@ public class OpenSearchConsumer {
                         .id(id);
 
                 // updates the existing request with same id
-                IndexResponse indexResponse = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
-                log.info(indexResponse.getId() + " : inserted");
+                // IndexResponse indexResponse = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
+                bulkRequest.add(indexRequest);
             }
-            // commit offsets manually, achieve at least once strategy
-            kafkaConsumer.commitSync();
-            log.info("Offset committed!");
+            if (bulkRequest.numberOfActions() > 0) {
+                BulkResponse bulkResponse = openSearchClient.bulk(bulkRequest, RequestOptions.DEFAULT);
+                if (RestStatus.OK.equals(bulkResponse.status())) {
+                    // commit offsets manually, achieve at least once strategy
+                    kafkaConsumer.commitSync();
+                    log.info("Offset committed!");
+                }
+
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    Thread.interrupted();
+                }
+            }
+
         }
     }
 
