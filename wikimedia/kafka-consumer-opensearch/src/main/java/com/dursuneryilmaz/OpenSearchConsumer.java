@@ -11,6 +11,7 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.opensearch.action.bulk.BulkRequest;
 import org.opensearch.action.bulk.BulkResponse;
@@ -49,41 +50,69 @@ public class OpenSearchConsumer {
         KafkaConsumer<String, String> kafkaConsumer = getKafkaConsumer();
         kafkaConsumer.subscribe(Collections.singleton(INDEX_NAME));
 
-        while (true) {
-            ConsumerRecords<String, String> recordList = kafkaConsumer.poll(Duration.ofMillis(3000));
-            int recordCount = recordList.count();
-            log.info("Read record count: " + recordCount);
 
-            // process as bulk, improve performance
-            BulkRequest bulkRequest = new BulkRequest();
+        // get a reference to the main thread
+        final Thread mainThread = Thread.currentThread();
+        // adding the shutdown hook
+        Runtime.getRuntime().addShutdownHook(new Thread() {
+            public void run() {
+                log.info("Detected a shutdown, let's exit by calling consumer.wakeup()...");
+                kafkaConsumer.wakeup();
 
-            for (ConsumerRecord<String, String> record : recordList) {
-                // make consumer idempotent and transaction unique set an id to index request, get id from incoming data preferred
-                // String id = record.topic() + "_" + record.partition() + "_" + record.offset(); // or get id from kafka coordinates
-                String id = getIdFromData(record.value());
-                IndexRequest indexRequest = new IndexRequest(INDEX_NAME)
-                        .source(record.value(), XContentType.JSON)
-                        .id(id);
-
-                // updates the existing request with same id
-                // IndexResponse indexResponse = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
-                bulkRequest.add(indexRequest);
-            }
-            if (bulkRequest.numberOfActions() > 0) {
-                BulkResponse bulkResponse = openSearchClient.bulk(bulkRequest, RequestOptions.DEFAULT);
-                if (RestStatus.OK.equals(bulkResponse.status())) {
-                    // commit offsets manually, achieve at least once strategy
-                    kafkaConsumer.commitSync();
-                    log.info("Offset committed!");
-                }
-
+                // join the main thread to allow the execution of the code in the main thread
                 try {
-                    Thread.sleep(1000);
+                    mainThread.join();
                 } catch (InterruptedException e) {
-                    Thread.interrupted();
+                    e.printStackTrace();
                 }
             }
+        });
 
+        try {
+            while (true) {
+                ConsumerRecords<String, String> recordList = kafkaConsumer.poll(Duration.ofMillis(3000));
+                int recordCount = recordList.count();
+                log.info("Read record count: " + recordCount);
+
+                // process as bulk, improve performance
+                BulkRequest bulkRequest = new BulkRequest();
+
+                for (ConsumerRecord<String, String> record : recordList) {
+                    // make consumer idempotent and transaction unique set an id to index request, get id from incoming data preferred
+                    // String id = record.topic() + "_" + record.partition() + "_" + record.offset(); // or get id from kafka coordinates
+                    String id = getIdFromData(record.value());
+                    IndexRequest indexRequest = new IndexRequest(INDEX_NAME)
+                            .source(record.value(), XContentType.JSON)
+                            .id(id);
+
+                    // updates the existing request with same id
+                    // IndexResponse indexResponse = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
+                    bulkRequest.add(indexRequest);
+                }
+                if (bulkRequest.numberOfActions() > 0) {
+                    BulkResponse bulkResponse = openSearchClient.bulk(bulkRequest, RequestOptions.DEFAULT);
+                    if (RestStatus.OK.equals(bulkResponse.status())) {
+                        // commit offsets manually, achieve at least once strategy
+                        kafkaConsumer.commitSync();
+                        log.info("Offset committed!");
+                    }
+
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        Thread.interrupted();
+                    }
+                }
+
+            }
+        } catch (WakeupException e) {
+            log.info("Consumer is starting to shut down");
+        } catch (Exception e) {
+            log.error("Unexpected exception in the consumer", e);
+        } finally {
+            kafkaConsumer.close(); // close the consumer, this will also commit offsets
+            openSearchClient.close();
+            log.info("The consumer is now gracefully shut down");
         }
     }
 
