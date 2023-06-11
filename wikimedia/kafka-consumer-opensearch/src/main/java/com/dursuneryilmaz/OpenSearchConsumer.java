@@ -1,5 +1,6 @@
 package com.dursuneryilmaz;
 
+import com.google.gson.JsonParser;
 import org.apache.http.HttpHost;
 import org.apache.http.auth.AuthScope;
 import org.apache.http.auth.UsernamePasswordCredentials;
@@ -7,18 +8,25 @@ import org.apache.http.client.CredentialsProvider;
 import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.apache.http.impl.client.DefaultConnectionKeepAliveStrategy;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.opensearch.action.index.IndexRequest;
+import org.opensearch.action.index.IndexResponse;
 import org.opensearch.client.RequestOptions;
 import org.opensearch.client.RestClient;
 import org.opensearch.client.RestHighLevelClient;
 import org.opensearch.client.indices.CreateIndexRequest;
 import org.opensearch.client.indices.GetIndexRequest;
+import org.opensearch.common.xcontent.XContentType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.URI;
+import java.time.Duration;
+import java.util.Collections;
 import java.util.Properties;
 
 public class OpenSearchConsumer {
@@ -29,10 +37,42 @@ public class OpenSearchConsumer {
         RestHighLevelClient openSearchClient = getOpenSearchClient();
 
         // create index on OpenSearch if not exist
-        initOpenSearchIndex(log, INDEX_NAME, openSearchClient);
+        if (!initOpenSearchIndex(log, INDEX_NAME, openSearchClient)) {
+            return;
+        }
+
 
         // kafka consumer
         KafkaConsumer<String, String> kafkaConsumer = getKafkaConsumer();
+        kafkaConsumer.subscribe(Collections.singleton(INDEX_NAME));
+
+        while (true) {
+            ConsumerRecords<String, String> recordList = kafkaConsumer.poll(Duration.ofMillis(3000));
+            int recordCount = recordList.count();
+            log.info("Read record count: " + recordCount);
+
+            for (ConsumerRecord<String, String> record : recordList) {
+                // make consumer idempotent and transaction unique set an id to index request, get id from incoming data preferred
+                // String id = record.topic() + "_" + record.partition() + "_" + record.offset(); // or get id from kafka coordinates
+                String id = getIdFromData(record.value());
+                IndexRequest indexRequest = new IndexRequest(INDEX_NAME)
+                        .source(record.value(), XContentType.JSON)
+                        .id(id);
+
+                // updates the existing request with same id
+                IndexResponse indexResponse = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
+                log.info(indexResponse.getId() + " : inserted");
+            }
+        }
+    }
+
+    private static String getIdFromData(String value) {
+        return JsonParser.parseString(value)
+                .getAsJsonObject()
+                .get("meta")
+                .getAsJsonObject()
+                .get("id")
+                .getAsString();
     }
 
     public static RestHighLevelClient getOpenSearchClient() {
@@ -49,21 +89,21 @@ public class OpenSearchConsumer {
             // REST client with security
             String[] auth = userInfo.split(":");
 
-            CredentialsProvider cp = new BasicCredentialsProvider();
-            cp.setCredentials(AuthScope.ANY, new UsernamePasswordCredentials(auth[0], auth[1]));
+            CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
+            credentialsProvider.setCredentials(AuthScope.ANY, new UsernamePasswordCredentials(auth[0], auth[1]));
 
             restHighLevelClient = new RestHighLevelClient(
                     RestClient.builder(new HttpHost(connUri.getHost(), connUri.getPort(), connUri.getScheme()))
                             .setHttpClientConfigCallback(
-                                    httpAsyncClientBuilder -> httpAsyncClientBuilder.setDefaultCredentialsProvider(cp)
+                                    httpAsyncClientBuilder -> httpAsyncClientBuilder.setDefaultCredentialsProvider(credentialsProvider)
                                             .setKeepAliveStrategy(new DefaultConnectionKeepAliveStrategy())));
         }
 
         return restHighLevelClient;
     }
 
-    private static void initOpenSearchIndex(Logger log, String indexName, RestHighLevelClient openSearchClient) throws IOException {
-        try (openSearchClient) {
+    private static boolean initOpenSearchIndex(Logger log, String indexName, RestHighLevelClient openSearchClient) {
+        try {
             boolean isIndexExist = openSearchClient.indices().exists(new GetIndexRequest(indexName), RequestOptions.DEFAULT);
             if (!isIndexExist) {
                 CreateIndexRequest createIndexRequest = new CreateIndexRequest(indexName);
@@ -72,12 +112,16 @@ public class OpenSearchConsumer {
             } else {
                 log.info("OpenSearch index already exist : " + indexName);
             }
+        } catch (IOException e) {
+            log.error(e.getMessage());
+            return false;
         }
+        return true;
     }
 
     private static KafkaConsumer<String, String> getKafkaConsumer() {
         String bootstrapServer = "127.0.0.1:9092";
-        String groupId = "consumer-opensearch-wikimedia";
+        String groupId = "opensearch-wikimedia";
 
         Properties properties = new Properties();
         properties.setProperty(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServer);
